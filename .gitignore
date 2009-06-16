@@ -20,8 +20,6 @@ configure
 depcomp
 install-sh
 memcached
-memcached-debug
-memcached-debug.profile
 missing
 stamp-h1
 tags
@@ -32,8 +30,11 @@ memcached_dtrace.h
 memcached-*.tar.gz
 doc/protocol-binary-range.txt
 doc/protocol-binary.txt
-/sizes
+/tests/sizes
+/tests/sizes.profile
 /version.m4
 /version.num
-/testapp
+/tests/testapp
+/tests/testapp.profile
+/tests/memcached.profile
 /doc/doxy

@@ -17,4 +17,3 @@ endif
 
 %.full: %.xml xml2rfc/rfc2629-noinc.xsl
 	@XSLTPROC@ xml2rfc/rfc2629-noinc.xsl $< >$@
-

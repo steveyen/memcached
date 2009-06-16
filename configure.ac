@@ -2,11 +2,16 @@ AC_PREREQ(2.52)
 m4_include([version.m4])
 AC_INIT(memcached, VERSION_NUMBER, brad@danga.com)
 AC_CANONICAL_SYSTEM
-AC_CONFIG_SRCDIR(memcached.c)
+AC_CONFIG_SRCDIR(server/memcached.c)
 AM_INIT_AUTOMAKE(AC_PACKAGE_NAME, AC_PACKAGE_VERSION)
-AM_CONFIG_HEADER(config.h)
+AM_CONFIG_HEADER(server/config.h)
 
 AC_PROG_CC
+
+if test "x${enable_dependency_tracking}" = "x"
+then
+  enable_dependency_tracking=yes
+fi
 
 dnl **********************************************************************
 dnl DETECT_ICC ([ACTION-IF-YES], [ACTION-IF-NO])
@@ -79,12 +84,16 @@ if test "x$enable_dtrace" == "xyes"; then
     AC_DEFINE([ENABLE_DTRACE],1,[Set to nonzero if you want to include DTRACE])
     build_dtrace=yes
     # DTrace on MacOSX does not use -G option
-    $DTRACE -G -o conftest.$$ -s memcached_dtrace.d 2>/dev/zero
+    AC_MSG_CHECKING([dtrace needs -G])
+    dtrace_instrument_obj=no
+
+    $DTRACE -G -o conftest.$$ -s $srcdir/server/memcached_dtrace.d 2>/dev/zero
     if test $? -eq 0
     then
         dtrace_instrument_obj=yes
         rm conftest.$$
     fi
+    AC_MSG_RESULT($dtrace_instrument_obj)
 
     if test "`which tr`" = "/usr/ucb/tr"; then
         AC_MSG_ERROR([Please remove /usr/ucb from your path. See man standards for more info])
@@ -99,12 +108,14 @@ AM_CONDITIONAL([DTRACE_INSTRUMENT_OBJ],[test "$dtrace_instrument_obj" = "yes"])
 
 AC_SUBST(DTRACE)
 AC_SUBST(DTRACEFLAGS)
-AC_SUBST(PROFILER_LDFLAGS)
 
-AC_ARG_ENABLE(coverage,
-  [AS_HELP_STRING([--disable-coverage],[Disable code coverage])])
+AC_ARG_ENABLE([coverate],
+  [AS_HELP_STRING([--enable-coverage],
+     [Enable code coverage @<:@default=off@:>@])],
+     [ac_enable_coverage="$enableval"],
+     [ac_enable_coverage="no"])
 
-if test "x$enable_coverage" != "xno"; then
+if test "x$enable_coverage" == "xyes"; then
    if test "$ICC" = "yes"
    then
       :
@@ -113,19 +124,17 @@ if test "x$enable_coverage" != "xno"; then
    then
       AC_PATH_PROG([PROFILER], [gcov], "no", [$PATH])
       if test "x$PROFILER" != "xno"; then
-         PROFILER_FLAGS="-fprofile-arcs -ftest-coverage"
-         PROFILER_LDFLAGS="-lgcov"
+         CFLAGS="-fprofile-arcs -ftest-coverage $CFLAGS"
+         LDFLAGS="-lgcov $LDFLAGS"
       fi
    elif test "$SUNCC" = "yes"
    then
       AC_PATH_PROG([PROFILER], [tcov], "no", [$PATH])
       if test "x$PROFILER" != "xno"; then
-         PROFILER_FLAGS=-xprofile=tcov
+         CFLAGS="-xprofile=tcov $CFLAGS"
       fi
    fi
 fi
-AC_SUBST(PROFILER_FLAGS)
-
 
 AC_ARG_ENABLE(64bit,
   [AS_HELP_STRING([--enable-64bit],[build 64bit version])])
@@ -371,5 +380,7 @@ then
   CFLAGS="$CFLAGS -errfmt=error -errwarn -errshort=tags"
 fi
 
-AC_CONFIG_FILES(Makefile doc/Makefile)
+CPPFLAGS="-I\$(top_srcdir)/include ${CPPFLAGS}"
+
+AC_CONFIG_FILES(Makefile doc/Makefile server/Makefile tests/Makefile)
 AC_OUTPUT

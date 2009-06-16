@@ -19,7 +19,7 @@
 #include <stdint.h>
 #include <pthread.h>
 
-#include "protocol_binary.h"
+#include "memcached/protocol_binary.h"
 #include "cache.h"
 
 /** Maximum length of a key. */

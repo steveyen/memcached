@@ -4,8 +4,8 @@ use FindBin qw($Bin);
 our @files;
 
 BEGIN {
-    chdir "$Bin/.." or die;
-    @files = grep {! /^config.h$/ } (glob("*.h"), glob("*.c"), glob("*.ac"), "memcached.spec");
+    chdir "$Bin/../.." or die;
+    @files = grep {! /^config.h$/ } (glob("*/*.[ch]"), glob("*.ac"), "memcached.spec");
 }
 use Test::More tests => scalar(@files);
 
