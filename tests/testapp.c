@@ -235,7 +235,7 @@ static enum test_return test_issue_44(void) {
     char buffer[256];
     char cwd[256];
 
-    sprintf(pidfile, "/tmp/memcached.%d", getpid());
+    sprintf(pidfile, "/tmp/memcached.%lu", (unsigned long)getpid());
     assert(getcwd(cwd, 256) != NULL);
     sprintf(buffer, "../server/memcached -p 0 -P %s -d -E %s/../plugin/slab/.libs/libmemcachedslab.so", pidfile, cwd);
     assert(system(buffer) == 0);

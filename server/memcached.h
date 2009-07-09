@@ -381,7 +381,7 @@ void append_stat(const char *name, ADD_STAT add_stats, conn *c,
                  const char *fmt, ...);
 
 #ifdef HAVE_DROP_PRIVILEGES
-extern void drop_privileges();
+extern void drop_privileges(void);
 #else
 #define drop_privileges()
 #endif
