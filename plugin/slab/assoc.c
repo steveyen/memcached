@@ -11,7 +11,6 @@
  * The rest of the file is licensed under the BSD license.  See LICENSE.
  */
 
-#include "memcached.h"
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/signal.h>
@@ -25,8 +24,15 @@
 #include <assert.h>
 #include <pthread.h>
 
-static pthread_cond_t maintenance_cond = PTHREAD_COND_INITIALIZER;
+#include "slab_engine.h"
 
+#ifdef ENABLE_DTRACE
+#error "dtrace support is currently broken"
+#else
+#define MEMCACHED_ASSOC_FIND(key, nkey, depth)
+#define MEMCACHED_ASSOC_INSERT(key, nkey, hash_items)
+#define MEMCACHED_ASSOC_DELETE(key, nkey, hash_items)
+#endif
 
 typedef  unsigned long  int  ub4;   /* unsigned 4-byte quantities */
 typedef  unsigned       char ub1;   /* unsigned 1-byte quantities */
@@ -38,13 +44,13 @@ static unsigned int hashpower = 16;
 #define hashmask(n) (hashsize(n)-1)
 
 /* Main hash table. This is where we look except during expansion. */
-static item** primary_hashtable = 0;
+static slab_item** primary_hashtable = 0;
 
 /*
  * Previous hash table. During expansion, we look here for keys that haven't
  * been moved over to the primary yet.
  */
-static item** old_hashtable = 0;
+static slab_item** old_hashtable = 0;
 
 /* Number of items in the hash table. */
 static unsigned int hash_items = 0;
@@ -66,9 +72,9 @@ void assoc_init(void) {
     }
 }
 
-item *assoc_find(const char *key, const size_t nkey) {
+slab_item *assoc_find(const char *key, const size_t nkey) {
     uint32_t hv = hash(key, nkey, 0);
-    item *it;
+    slab_item *it;
     unsigned int oldbucket;
 
     if (expanding &&
@@ -79,10 +85,10 @@ item *assoc_find(const char *key, const size_t nkey) {
         it = primary_hashtable[hv & hashmask(hashpower)];
     }
 
-    item *ret = NULL;
+    slab_item *ret = NULL;
     int depth = 0;
     while (it) {
-        if ((nkey == it->nkey) && (memcmp(key, ITEM_key(it), nkey) == 0)) {
+        if ((nkey == it->item.nkey) && (memcmp(key, ITEM_key(&it->item), nkey) == 0)) {
             ret = it;
             break;
         }
@@ -96,9 +102,9 @@ item *assoc_find(const char *key, const size_t nkey) {
 /* returns the address of the item pointer before the key.  if *item == 0,
    the item wasn't found */
 
-static item** _hashitem_before (const char *key, const size_t nkey) {
+static slab_item** _hashitem_before (const char *key, const size_t nkey) {
     uint32_t hv = hash(key, nkey, 0);
-    item **pos;
+    slab_item **pos;
     unsigned int oldbucket;
 
     if (expanding &&
@@ -109,7 +115,7 @@ static item** _hashitem_before (const char *key, const size_t nkey) {
         pos = &primary_hashtable[hv & hashmask(hashpower)];
     }
 
-    while (*pos && ((nkey != (*pos)->nkey) || memcmp(key, ITEM_key(*pos), nkey))) {
+    while (*pos && ((nkey != (*pos)->item.nkey) || memcmp(key, ITEM_key(&(*pos)->item), nkey))) {
         pos = &(*pos)->h_next;
     }
     return pos;
@@ -117,6 +123,8 @@ static item** _hashitem_before (const char *key, const size_t nkey) {
 
 /* grows the hashtable to the next power of 2. */
 static void assoc_expand(void) {
+#if 0
+    TROND
     old_hashtable = primary_hashtable;
 
     primary_hashtable = calloc(hashsize(hashpower + 1), sizeof(void *));
@@ -131,16 +139,17 @@ static void assoc_expand(void) {
         primary_hashtable = old_hashtable;
         /* Bad news, but we can keep running. */
     }
+#endif
 }
 
 /* Note: this isn't an assoc_update.  The key must not already exist to call this */
-int assoc_insert(item *it) {
+int assoc_insert(slab_item *it) {
     uint32_t hv;
     unsigned int oldbucket;
 
-    assert(assoc_find(ITEM_key(it), it->nkey) == 0);  /* shouldn't have duplicately named things defined */
+    assert(assoc_find(ITEM_key(&it->item), it->item.nkey) == 0);  /* shouldn't have duplicately named things defined */
 
-    hv = hash(ITEM_key(it), it->nkey, 0);
+    hv = hash(ITEM_key(&it->item), it->item.nkey, 0);
     if (expanding &&
         (oldbucket = (hv & hashmask(hashpower - 1))) >= expand_bucket)
     {
@@ -161,10 +170,10 @@ int assoc_insert(item *it) {
 }
 
 void assoc_delete(const char *key, const size_t nkey) {
-    item **before = _hashitem_before(key, nkey);
+    slab_item **before = _hashitem_before(key, nkey);
 
     if (*before) {
-        item *nxt;
+        slab_item *nxt;
         hash_items--;
         /* The DTrace probe cannot be triggered as the last instruction
          * due to possible tail-optimization by the compiler
@@ -180,7 +189,7 @@ void assoc_delete(const char *key, const size_t nkey) {
     assert(*before != 0);
 }
 
-
+#if 0
 static volatile int do_run_maintenance_thread = 1;
 
 #define DEFAULT_HASH_BULK_MOVE 1
@@ -196,7 +205,7 @@ static void *assoc_maintenance_thread(void *arg) {
         pthread_mutex_lock(&cache_lock);
 
         for (ii = 0; ii < hash_bulk_move && expanding; ++ii) {
-            item *it, *next;
+            slab_item *it, *next;
             int bucket;
 
             for (it = old_hashtable[expand_bucket]; NULL != it; it = next) {
@@ -258,3 +267,4 @@ void stop_assoc_maintenance_thread() {
 }
 
 
+#endif

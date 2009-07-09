@@ -4,6 +4,8 @@
  * The main memcached header holding commonly used data
  * structures and function prototypes.
  */
+#ifndef MEMCACHED_H
+#define MEMCACHED_H
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"
@@ -20,6 +22,7 @@
 #include <pthread.h>
 
 #include "memcached/protocol_binary.h"
+#include "memcached/engine.h"
 #include "cache.h"
 
 /** Maximum length of a key. */
@@ -69,30 +72,6 @@
 #define DONT_PREALLOC_SLABS
 #define MAX_NUMBER_OF_SLAB_CLASSES (POWER_LARGEST + 1)
 
-/** How long an object can reasonably be assumed to be locked before
-    harvesting it on a low memory condition. */
-#define TAIL_REPAIR_TIME (3 * 3600)
-
-/* warning: don't use these macros with a function, as it evals its arg twice */
-#define ITEM_get_cas(i) ((uint64_t)(((i)->it_flags & ITEM_CAS) ? \
-                                    *(uint64_t*)&((i)->end[0]) : 0x0))
-#define ITEM_set_cas(i,v) { if ((i)->it_flags & ITEM_CAS) { \
-                          *(uint64_t*)&((i)->end[0]) = v; } }
-
-#define ITEM_key(item) (((char*)&((item)->end[0])) \
-         + (((item)->it_flags & ITEM_CAS) ? sizeof(uint64_t) : 0))
-
-#define ITEM_suffix(item) ((char*) &((item)->end[0]) + (item)->nkey + 1 \
-         + (((item)->it_flags & ITEM_CAS) ? sizeof(uint64_t) : 0))
-
-#define ITEM_data(item) ((char*) &((item)->end[0]) + (item)->nkey + 1 \
-         + (item)->nsuffix \
-         + (((item)->it_flags & ITEM_CAS) ? sizeof(uint64_t) : 0))
-
-#define ITEM_ntotal(item) (sizeof(struct _stritem) + (item)->nkey + 1 \
-         + (item)->nsuffix + (item)->nbytes \
-         + (((item)->it_flags & ITEM_CAS) ? sizeof(uint64_t) : 0))
-
 /** Append a simple stat with a stat name, value format and value */
 #define APPEND_STAT(name, fmt, val) \
     append_stat(name, add_stats, c, fmt, val);
@@ -107,19 +86,6 @@
 /** Common APPEND_NUM_FMT_STAT format. */
 #define APPEND_NUM_STAT(num, name, fmt, val) \
     APPEND_NUM_FMT_STAT("%d:%s", num, name, fmt, val)
-
-/**
- * Callback for any function producing stats.
- *
- * @param key the stat's key
- * @param klen length of the key
- * @param val the stat's value in an ascii form (e.g. text form of a number)
- * @param vlen length of the value
- * @parm cookie magic callback cookie
- */
-typedef void (*ADD_STAT)(const char *key, const uint16_t klen,
-                         const char *val, const uint32_t vlen,
-                         const void *cookie);
 
 /*
  * NOTE: If you modify this table you _MUST_ update the function state_text
@@ -178,10 +144,6 @@ enum store_item_type {
     NOT_STORED=0, STORED, EXISTS, NOT_FOUND
 };
 
-
-/** Time relative to server start. Smaller than time_t on 64-bit systems. */
-typedef unsigned int rel_time_t;
-
 /** Stats stored per slab (and per thread). */
 struct slab_stats {
     uint64_t  set_cmds;
@@ -215,9 +177,6 @@ struct thread_stats {
  */
 struct stats {
     pthread_mutex_t mutex;
-    unsigned int  curr_items;
-    unsigned int  total_items;
-    uint64_t      curr_bytes;
     unsigned int  curr_conns;
     unsigned int  total_conns;
     unsigned int  conn_structs;
@@ -258,39 +217,15 @@ struct settings {
     bool use_cas;
     enum protocol binding_protocol;
     int backlog;
+    union {
+      ENGINE_HANDLE *v0;
+      ENGINE_HANDLE_V1 *v1;
+    } engine;
 };
 
 extern struct stats stats;
 extern time_t process_started;
 extern struct settings settings;
-
-#define ITEM_LINKED 1
-#define ITEM_CAS 2
-
-/* temp */
-#define ITEM_SLABBED 4
-
-/**
- * Structure for storing items within memcached.
- */
-typedef struct _stritem {
-    struct _stritem *next;
-    struct _stritem *prev;
-    struct _stritem *h_next;    /* hash chain next */
-    rel_time_t      time;       /* least recent access */
-    rel_time_t      exptime;    /* expire time */
-    int             nbytes;     /* size of data */
-    unsigned short  refcount;
-    uint8_t         nsuffix;    /* length of flags-and-length string */
-    uint8_t         it_flags;   /* ITEM_* above */
-    uint8_t         slabs_clsid;/* which slab class we're in */
-    uint8_t         nkey;       /* key length, w/terminating null and padding */
-    void * end[];
-    /* if it_flags & ITEM_CAS we have 8 bytes CAS */
-    /* then null-terminated key */
-    /* then " flags length\r\n" (no terminating null) */
-    /* then data with terminating \r\n (no terminating null; it's binary!) */
-} item;
 
 typedef struct {
     pthread_t thread_id;        /* unique ID of this thread */
@@ -340,6 +275,7 @@ struct conn {
      */
 
     void   *item;     /* for commands set/add/replace  */
+    ENGINE_STORE_OPERATION    item_comm; /* which one is it: set/add/replace */
 
     /* data for the swallow state */
     int    sbytes;    /* how many bytes to swallow */
@@ -392,6 +328,9 @@ struct conn {
     int keylen;
     conn   *next;     /* Used for generating a list of conn structures */
     LIBEVENT_THREAD *thread; /* Pointer to the thread object serving this connection */
+
+    ENGINE_ERROR_CODE aiostat;
+    bool ewouldblock;
 };
 
 
@@ -402,17 +341,12 @@ extern volatile rel_time_t current_time;
  * Functions
  */
 void do_accept_new_conns(const bool do_accept);
-char *do_add_delta(conn *c, item *item, const bool incr, const int64_t delta,
-                   char *buf);
-enum store_item_type do_store_item(item *item, int comm, conn* c);
-conn *conn_new(const int sfd, const enum conn_states init_state, const int event_flags, const int read_buffer_size, enum network_transport transport, struct event_base *base);
+conn *conn_new(const int sfd, const enum conn_states init_state,
+               const int event_flags, const int read_buffer_size,
+               enum network_transport transport, struct event_base *base);
 extern int daemonize(int nochdir, int noclose);
 
-
 #include "stats.h"
-#include "slabs.h"
-#include "assoc.h"
-#include "items.h"
 #include "trace.h"
 #include "hash.h"
 #include "util.h"
@@ -426,40 +360,27 @@ extern int daemonize(int nochdir, int noclose);
 
 void thread_init(int nthreads, struct event_base *main_base);
 int  dispatch_event_add(int thread, conn *c);
-void dispatch_conn_new(int sfd, enum conn_states init_state, int event_flags, int read_buffer_size, enum network_transport transport);
+void dispatch_conn_new(int sfd, enum conn_states init_state,
+                       int event_flags, int read_buffer_size,
+                       enum network_transport transport);
 
-/* Lock wrappers for cache functions that are called from main loop. */
-char *add_delta(conn *c, item *item, const int incr, const int64_t delta,
-                char *buf);
 void accept_new_conns(const bool do_accept);
 conn *conn_from_freelist(void);
 bool  conn_add_to_freelist(conn *c);
 int   is_listen_thread(void);
-item *item_alloc(char *key, size_t nkey, int flags, rel_time_t exptime, int nbytes);
-char *item_cachedump(const unsigned int slabs_clsid, const unsigned int limit, unsigned int *bytes);
-void  item_flush_expired(void);
-item *item_get(const char *key, const size_t nkey);
-int   item_link(item *it);
-void  item_remove(item *it);
-int   item_replace(item *it, item *new_it);
-void  item_stats(ADD_STAT add_stats, void *c);
-void  item_stats_sizes(ADD_STAT add_stats, void *c);
-void  item_unlink(item *it);
-void  item_update(item *it);
 
 void STATS_LOCK(void);
 void STATS_UNLOCK(void);
 void threadlocal_stats_reset(void);
 void threadlocal_stats_aggregate(struct thread_stats *stats);
 void slab_stats_aggregate(struct thread_stats *stats, struct slab_stats *out);
+rel_time_t realtime(const time_t exptime);
 
 /* Stat processing functions */
 void append_stat(const char *name, ADD_STAT add_stats, conn *c,
                  const char *fmt, ...);
 
-enum store_item_type store_item(item *item, int comm, conn *c);
-
-#if HAVE_DROP_PRIVILEGES
+#ifdef HAVE_DROP_PRIVILEGES
 extern void drop_privileges();
 #else
 #define drop_privileges()
@@ -472,3 +393,5 @@ extern void drop_privileges();
 
 #define likely(x)       __builtin_expect((x),1)
 #define unlikely(x)     __builtin_expect((x),0)
+
+#endif

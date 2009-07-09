@@ -3,12 +3,9 @@ BUILT_SOURCES=
 
 memcached_SOURCES = memcached.c memcached.h \
                     hash.c hash.h \
-                    slabs.c slabs.h \
-                    items.c items.h \
-                    assoc.c assoc.h \
                     thread.c daemon.c \
                     stats.c stats.h \
-                    util.c util.h \
+                    util.c \
                     trace.h cache.h
 
 if BUILD_CACHE
@@ -20,6 +17,7 @@ memcached_SOURCES += solaris_priv.c
 endif
 
 memcached_LDADD=
+memcached_LDFLAGS=-rpath '$(libdir)'
 memcached_DEPENDENCIES=
 CLEANFILES=
 

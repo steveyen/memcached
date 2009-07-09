@@ -7,6 +7,8 @@ AM_INIT_AUTOMAKE(AC_PACKAGE_NAME, AC_PACKAGE_VERSION)
 AM_CONFIG_HEADER(server/config.h)
 
 AC_PROG_CC
+AC_DISABLE_STATIC
+AC_PROG_LIBTOOL
 
 if test "x${enable_dependency_tracking}" = "x"
 then
@@ -239,6 +241,8 @@ dnl ----------------------------------------------------------------------------
 AC_SEARCH_LIBS(socket, socket)
 AC_SEARCH_LIBS(gethostbyname, nsl)
 AC_SEARCH_LIBS(umem_cache_create, umem)
+AC_SEARCH_LIBS(dlopen, dl)
+AC_CHECK_HEADERS(link.h dlfcn.h)
 AC_HEADER_STDBOOL
 AC_C_CONST
 
@@ -375,6 +379,7 @@ elif test "$GCC" = "yes"
 then
   CFLAGS="$CFLAGS -Wall -Werror -pedantic -Wstrict-prototypes -Wmissing-prototypes -Wmissing-declarations -Wredundant-decls"
   AC_DEFINE([_GNU_SOURCE],[1],[find sigignore on Linux])
+  LDFLAGS="$LDFLAGS -rdynamic"
 elif test "$SUNCC" = "yes"
 then
   CFLAGS="$CFLAGS -errfmt=error -errwarn -errshort=tags"
@@ -382,5 +387,5 @@ fi
 
 CPPFLAGS="-I\$(top_srcdir)/include ${CPPFLAGS}"
 
-AC_CONFIG_FILES(Makefile doc/Makefile server/Makefile tests/Makefile)
+AC_CONFIG_FILES(Makefile doc/Makefile plugin/Makefile plugin/slab/Makefile server/Makefile tests/Makefile)
 AC_OUTPUT

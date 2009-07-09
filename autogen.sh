@@ -18,6 +18,10 @@ echo "autoheader..."
 AUTOHEADER=${AUTOHEADER:-autoheader}
 $AUTOHEADER || exit 1
 
+echo "libtoolize..."
+LIBTOOLIZE=`which libtoolize || which glibtoolize || which libtoolize-1.5 || exit 1`
+$LIBTOOLIZE --copy --force --automake || exit 1
+
 echo "automake..."
 AUTOMAKE=`which automake-1.10 || which automake-1.9 || which automake-1.7 || exit 1`
 $AUTOMAKE --foreign --add-missing || automake --gnu --add-missing || exit 1

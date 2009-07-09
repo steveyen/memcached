@@ -7,7 +7,6 @@
  * slab size is always 1MB, since that's the maximum item size allowed by the
  * memcached protocol.
  */
-#include "memcached.h"
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/signal.h>
@@ -20,6 +19,28 @@
 #include <string.h>
 #include <assert.h>
 #include <pthread.h>
+
+#include "slab_engine.h"
+
+/* Slab sizing definitions. */
+/* FIXME: I had to copy the symbols back to the slab engine find a
+ * permanent soultion.... */
+#define POWER_SMALLEST 1
+#define POWER_LARGEST  200
+#define POWER_BLOCK 1048576
+#define CHUNK_ALIGN_BYTES 8
+#define DONT_PREALLOC_SLABS
+#define MAX_NUMBER_OF_SLAB_CLASSES (POWER_LARGEST + 1)
+
+#ifdef ENABLE_DTRACE
+#error "dtrace support is currently broken"
+#else
+#define MEMCACHED_SLABS_SLABCLASS_ALLOCATE_FAILED(a)
+#define MEMCACHED_SLABS_SLABCLASS_ALLOCATE(a)
+#define MEMCACHED_SLABS_ALLOCATE_FAILED(a, b)
+#define MEMCACHED_SLABS_ALLOCATE(a,b,c,d)
+#define MEMCACHED_SLABS_FREE(a,b,c)
+#endif
 
 /* powers-of-N allocation structures */
 
@@ -95,9 +116,9 @@ unsigned int slabs_clsid(const size_t size) {
  * Determines the chunk sizes and initializes the slab class descriptors
  * accordingly.
  */
-void slabs_init(const size_t limit, const double factor, const bool prealloc) {
+void slabs_init(size_t limit, double factor, bool prealloc, size_t chunk_size) {
     int i = POWER_SMALLEST - 1;
-    unsigned int size = sizeof(item) + settings.chunk_size;
+    unsigned int size = sizeof(slab_item) + chunk_size;
 
     /* Factor of 2.0 means use the default memcached behavior */
     if (factor == 2.0 && size < 128)
@@ -127,10 +148,13 @@ void slabs_init(const size_t limit, const double factor, const bool prealloc) {
         slabclass[i].size = size;
         slabclass[i].perslab = POWER_BLOCK / slabclass[i].size;
         size *= factor;
+#if 0
         if (settings.verbose > 1) {
             fprintf(stderr, "slab class %3d: chunk size %6u perslab %5u\n",
                     i, slabclass[i].size, slabclass[i].perslab);
         }
+#endif
+
     }
 
     power_largest = i;
@@ -228,7 +252,7 @@ static void *do_slabs_alloc(const size_t size, unsigned int id) {
     }
 
     p = &slabclass[id];
-    assert(p->sl_curr == 0 || ((item *)p->slots[p->sl_curr - 1])->slabs_clsid == 0);
+    assert(p->sl_curr == 0 || ((slab_item *)p->slots[p->sl_curr - 1])->slabs_clsid == 0);
 
 #ifdef USE_SYSTEM_MALLOC
     if (mem_limit && mem_malloced + size > mem_limit) {
@@ -273,7 +297,7 @@ static void *do_slabs_alloc(const size_t size, unsigned int id) {
 static void do_slabs_free(void *ptr, const size_t size, unsigned int id) {
     slabclass_t *p;
 
-    assert(((item *)ptr)->slabs_clsid == 0);
+    assert(((slab_item *)ptr)->slabs_clsid == 0);
     assert(id >= POWER_SMALLEST && id <= power_largest);
     if (id < POWER_SMALLEST || id > power_largest)
         return;
@@ -299,13 +323,9 @@ static void do_slabs_free(void *ptr, const size_t size, unsigned int id) {
     return;
 }
 
-static int nz_strcmp(int nzlength, const char *nz, const char *z) {
-    int zlength=strlen(z);
-    return (zlength == nzlength) && (strncmp(nz, z, zlength) == 0) ? 0 : -1;
-}
-
-bool get_stats(const char *stat_type, int nkey, ADD_STAT add_stats, void *c) {
+bool get_stats(const char *stat_type, int nkey, ADD_STAT add_stats, const void *c) {
     bool ret = true;
+#if 0
 
     if (add_stats != NULL) {
         if (!stat_type) {
@@ -328,15 +348,33 @@ bool get_stats(const char *stat_type, int nkey, ADD_STAT add_stats, void *c) {
         ret = false;
     }
 
+#endif
     return ret;
 }
 
+
+/** Append a simple stat with a stat name, value format and value */
+#define APPEND_STAT(name, fmt, val) \
+    append_stat(name, add_stats, c, fmt, val);
+
+/** Append an indexed stat with a stat name (with format), value format
+    and value */
+#define APPEND_NUM_FMT_STAT(name_fmt, num, name, fmt, val)   \
+    klen = sprintf(key_str, name_fmt, num, name);            \
+    vlen = sprintf(val_str, fmt, val);                       \
+    add_stats(key_str, klen, val_str, vlen, c);
+
+/** Common APPEND_NUM_FMT_STAT format. */
+#define APPEND_NUM_STAT(num, name, fmt, val) \
+    APPEND_NUM_FMT_STAT("%d:%s", num, name, fmt, val)
+
+extern void append_stat(const char *name, ADD_STAT add_stats, const void *c,
+                        const char *fmt, ...);
+
+
 /*@null@*/
-static void do_slabs_stats(ADD_STAT add_stats, void *c) {
+static void do_slabs_stats(ADD_STAT add_stats, const void *c) {
     int i, total;
-    /* Get the per-thread stats which contain some interesting aggregates */
-    struct thread_stats thread_stats;
-    threadlocal_stats_aggregate(&thread_stats);
 
     total = 0;
     for(i = POWER_SMALLEST; i <= power_largest; i++) {
@@ -358,27 +396,11 @@ static void do_slabs_stats(ADD_STAT add_stats, void *c) {
                             slabs*perslab - p->sl_curr - p->end_page_free);
             APPEND_NUM_STAT(i, "free_chunks", "%u", p->sl_curr);
             APPEND_NUM_STAT(i, "free_chunks_end", "%u", p->end_page_free);
-            APPEND_NUM_STAT(i, "get_hits", "%llu",
-                    (unsigned long long)thread_stats.slab_stats[i].get_hits);
-            APPEND_NUM_STAT(i, "cmd_set", "%llu",
-                    (unsigned long long)thread_stats.slab_stats[i].set_cmds);
-            APPEND_NUM_STAT(i, "delete_hits", "%llu",
-                    (unsigned long long)thread_stats.slab_stats[i].delete_hits);
-            APPEND_NUM_STAT(i, "incr_hits", "%llu",
-                    (unsigned long long)thread_stats.slab_stats[i].incr_hits);
-            APPEND_NUM_STAT(i, "decr_hits", "%llu",
-                    (unsigned long long)thread_stats.slab_stats[i].decr_hits);
-            APPEND_NUM_STAT(i, "cas_hits", "%llu",
-                    (unsigned long long)thread_stats.slab_stats[i].cas_hits);
-            APPEND_NUM_STAT(i, "cas_badval", "%llu",
-                    (unsigned long long)thread_stats.slab_stats[i].cas_badval);
-
             total++;
         }
     }
 
     /* add overall slab stats and append terminator */
-
     APPEND_STAT("active_slabs", "%d", total);
     APPEND_STAT("total_malloced", "%llu", (unsigned long long)mem_malloced);
     add_stats(NULL, 0, NULL, 0, c);
@@ -420,7 +442,7 @@ int do_slabs_reassign(unsigned char srcid, unsigned char dstid) {
     slab_end = (char*)slab + POWER_BLOCK;
 
     for (iter = slab; iter < slab_end; (char*)iter += p->size) {
-        item *it = (item *)iter;
+        item *it = (slab_item *)iter;
         if (it->slabs_clsid) {
             if (it->refcount) was_busy = true;
             item_unlink(it);
@@ -450,7 +472,7 @@ int do_slabs_reassign(unsigned char srcid, unsigned char dstid) {
     /* this isn't too critical, but other parts of the code do asserts to
        make sure this field is always 0.  */
     for (iter = slab; iter < slab_end; (char*)iter += dp->size) {
-        ((item *)iter)->slabs_clsid = 0;
+        ((slab_item *)iter)->slabs_clsid = 0;
     }
     return 1;
 }
@@ -509,7 +531,7 @@ void slabs_free(void *ptr, size_t size, unsigned int id) {
     pthread_mutex_unlock(&slabs_lock);
 }
 
-void slabs_stats(ADD_STAT add_stats, void *c) {
+void slabs_stats(ADD_STAT add_stats, const void *c) {
     pthread_mutex_lock(&slabs_lock);
     do_slabs_stats(add_stats, c);
     pthread_mutex_unlock(&slabs_lock);

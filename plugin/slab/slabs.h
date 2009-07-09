@@ -8,7 +8,7 @@
     3rd argument specifies if the slab allocator should allocate all memory
     up front (if true), or allocate memory in chunks as it is needed (if false)
 */
-void slabs_init(const size_t limit, const double factor, const bool prealloc);
+void slabs_init(size_t limit, double factor, bool prealloc, size_t chunk_size);
 
 
 /**
@@ -25,10 +25,10 @@ void *slabs_alloc(const size_t size, unsigned int id);
 void slabs_free(void *ptr, size_t size, unsigned int id);
 
 /** Return a datum for stats in binary protocol */
-bool get_stats(const char *stat_type, int nkey, ADD_STAT add_stats, void *c);
+bool get_stats(const char *stat_type, int nkey, ADD_STAT add_stats, const void *c);
 
 /** Fill buffer with stats */ /*@null@*/
-void slabs_stats(ADD_STAT add_stats, void *c);
+void slabs_stats(ADD_STAT add_stats, const void *c);
 
 /* Request some slab be moved between classes
   1 = success

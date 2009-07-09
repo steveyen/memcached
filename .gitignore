@@ -4,6 +4,7 @@
 *.gcno
 *.tcov
 .deps
+.libs
 INSTALL
 Makefile
 Makefile.in
@@ -30,6 +31,7 @@ memcached_dtrace.h
 memcached-*.tar.gz
 doc/protocol-binary-range.txt
 doc/protocol-binary.txt
+doc/engine-interface.txt
 /tests/sizes
 /tests/sizes.profile
 /version.m4
@@ -38,3 +40,9 @@ doc/protocol-binary.txt
 /tests/testapp.profile
 /tests/memcached.profile
 /doc/doxy
+*.lo
+*.loT
+*.la
+*.full
+/libtool
+/ltmain.sh

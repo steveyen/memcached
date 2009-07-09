@@ -1,5 +1,5 @@
 /* -*- Mode: C; tab-width: 4; c-basic-offset: 4; indent-tabs-mode: nil -*- */
-#include "memcached.h"
+
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/signal.h>
@@ -13,9 +13,30 @@
 #include <time.h>
 #include <assert.h>
 
+#include "slab_engine.h"
+
+#ifdef ENABLE_DTRACE
+#error "dtrace support is currently broken"
+#else
+#define MEMCACHED_ITEM_LINK(a,b,c)
+#define MEMCACHED_ITEM_UNLINK(a,b,c)
+#define MEMCACHED_ITEM_REMOVE(a,b,c)
+#define MEMCACHED_ITEM_UPDATE(a, b, c)
+#define MEMCACHED_ITEM_REPLACE(a, b, c, d, e, f)
+#endif
+
 /* Forward Declarations */
-static void item_link_q(item *it);
-static void item_unlink_q(item *it);
+static void item_link_q(slab_item *it);
+static void item_unlink_q(slab_item *it);
+
+static inline size_t ITEM_ntotal(struct slab_item *it) {
+    size_t ret = sizeof(*it) + it->item.nkey + it->item.nbytes;
+    if (it->item.iflag & ITEM_WITH_CAS) {
+        ret += sizeof(uint64_t);
+    }
+
+    return ret;
+}
 
 /*
  * We only reposition items in the LRU queue if they haven't been repositioned
@@ -32,8 +53,8 @@ typedef struct {
     unsigned int tailrepairs;
 } itemstats_t;
 
-static item *heads[LARGEST_ID];
-static item *tails[LARGEST_ID];
+static slab_item *heads[LARGEST_ID];
+static slab_item *tails[LARGEST_ID];
 static itemstats_t itemstats[LARGEST_ID];
 static unsigned int sizes[LARGEST_ID];
 
@@ -47,10 +68,8 @@ void item_init(void) {
     }
 }
 
-void item_stats_reset(void) {
-    pthread_mutex_lock(&cache_lock);
-    memset(itemstats, 0, sizeof(itemstats_t) * LARGEST_ID);
-    pthread_mutex_unlock(&cache_lock);
+void do_item_stats_reset(void) {
+    memset(itemstats, 0, sizeof(itemstats));
 }
 
 
@@ -65,38 +84,21 @@ uint64_t get_cas_id(void) {
 # define DEBUG_REFCNT(it,op) \
                 fprintf(stderr, "item %x refcnt(%c) %d %c%c%c\n", \
                         it, op, it->refcount, \
-                        (it->it_flags & ITEM_LINKED) ? 'L' : ' ', \
-                        (it->it_flags & ITEM_SLABBED) ? 'S' : ' ')
+                        (it->item.iflag & ITEM_LINKED) ? 'L' : ' ', \
+                        (it->item.iflag & ITEM_SLABBED) ? 'S' : ' ')
 #else
 # define DEBUG_REFCNT(it,op) while(0)
 #endif
 
-/**
- * Generates the variable-sized part of the header for an object.
- *
- * key     - The key
- * nkey    - The length of the key
- * flags   - key flags
- * nbytes  - Number of bytes to hold value and addition CRLF terminator
- * suffix  - Buffer for the "VALUE" line suffix (flags, size).
- * nsuffix - The length of the suffix is stored here.
- *
- * Returns the total size of the header.
- */
-static size_t item_make_header(const uint8_t nkey, const int flags, const int nbytes,
-                     char *suffix, uint8_t *nsuffix) {
-    /* suffix is defined at 40 chars elsewhere.. */
-    *nsuffix = (uint8_t) snprintf(suffix, 40, " %d %d\r\n", flags, nbytes - 2);
-    return sizeof(item) + nkey + *nsuffix + nbytes;
-}
-
 /*@null@*/
-item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_time_t exptime, const int nbytes) {
-    uint8_t nsuffix;
-    item *it = NULL;
-    char suffix[40];
-    size_t ntotal = item_make_header(nkey + 1, flags, nbytes, suffix, &nsuffix);
-    if (settings.use_cas) {
+slab_item *do_item_alloc(struct slabber_engine *se,
+                         const char *key, const size_t nkey,
+                         const int flags, const rel_time_t exptime,
+                         const int nbytes) {
+    struct slab_item *it = NULL;
+    size_t ntotal = sizeof(struct slab_item) + nkey + nbytes;
+
+    if (se->config.use_cas) {
         ntotal += sizeof(uint64_t);
     }
 
@@ -106,19 +108,19 @@ item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_tim
 
     /* do a quick check if we have any expired items in the tail.. */
     int tries = 50;
-    item *search;
+    slab_item *search;
 
     for (search = tails[id];
          tries > 0 && search != NULL;
          tries--, search=search->prev) {
         if (search->refcount == 0 &&
-            (search->exptime != 0 && search->exptime < current_time)) {
+            (search->item.exptime != 0 && search->item.exptime < current_time)) {
             it = search;
             /* I don't want to actually free the object, just steal
              * the item to avoid to grab the slab mutex twice ;-)
              */
             it->refcount = 1;
-            do_item_unlink(it);
+            do_item_unlink(se, it);
             /* Initialize the item block: */
             it->slabs_clsid = 0;
             it->refcount = 0;
@@ -137,7 +139,7 @@ item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_tim
          * we're out of luck at this point...
          */
 
-        if (settings.evict_to_free == 0) {
+        if (!se->config.evict_to_free) {
             itemstats[id].outofmemory++;
             return NULL;
         }
@@ -156,14 +158,15 @@ item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_tim
 
         for (search = tails[id]; tries > 0 && search != NULL; tries--, search=search->prev) {
             if (search->refcount == 0) {
-                if (search->exptime == 0 || search->exptime > current_time) {
+                if (search->item.exptime == 0 || search->item.exptime > current_time) {
                     itemstats[id].evicted++;
                     itemstats[id].evicted_time = current_time - search->time;
-                    STATS_LOCK();
-                    stats.evictions++;
-                    STATS_UNLOCK();
+                    
+                    pthread_mutex_lock(&se->stats.lock);
+                    se->stats.evictions++;
+                    pthread_mutex_unlock(&se->stats.lock);
                 }
-                do_item_unlink(search);
+                do_item_unlink(se, search);
                 break;
             }
         }
@@ -182,7 +185,7 @@ item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_tim
                 if (search->refcount != 0 && search->time + TAIL_REPAIR_TIME < current_time) {
                     itemstats[id].tailrepairs++;
                     search->refcount = 0;
-                    do_item_unlink(search);
+                    do_item_unlink(se, search);
                     break;
                 }
             }
@@ -199,23 +202,23 @@ item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_tim
 
     assert(it != heads[it->slabs_clsid]);
 
-    it->next = it->prev = it->h_next = 0;
+    it->next = it->prev = it->h_next = NULL;
     it->refcount = 1;     /* the caller will have a reference */
     DEBUG_REFCNT(it, '*');
-    it->it_flags = settings.use_cas ? ITEM_CAS : 0;
-    it->nkey = nkey;
-    it->nbytes = nbytes;
-    memcpy(ITEM_key(it), key, nkey);
-    it->exptime = exptime;
-    memcpy(ITEM_suffix(it), suffix, (size_t)nsuffix);
-    it->nsuffix = nsuffix;
+    it->item.flags = flags;
+    it->item.iflag = se->config.use_cas ? ITEM_WITH_CAS : 0;
+    it->item.nkey = nkey;
+    it->item.nbytes = nbytes;
+    memcpy(ITEM_key(&it->item), key, nkey);
+    it->item.exptime = exptime;
+
     return it;
 }
 
-void item_free(item *it) {
+void item_free(struct slabber_engine *se, slab_item *it) {
     size_t ntotal = ITEM_ntotal(it);
     unsigned int clsid;
-    assert((it->it_flags & ITEM_LINKED) == 0);
+    assert((it->item.iflag & ITEM_LINKED) == 0);
     assert(it != heads[it->slabs_clsid]);
     assert(it != tails[it->slabs_clsid]);
     assert(it->refcount == 0);
@@ -223,27 +226,15 @@ void item_free(item *it) {
     /* so slab size changer can tell later if item is already free or not */
     clsid = it->slabs_clsid;
     it->slabs_clsid = 0;
-    it->it_flags |= ITEM_SLABBED;
+    it->item.iflag |= ITEM_SLABBED;
     DEBUG_REFCNT(it, 'F');
     slabs_free(it, ntotal, clsid);
 }
 
-/**
- * Returns true if an item will fit in the cache (its size does not exceed
- * the maximum for a cache entry.)
- */
-bool item_size_ok(const size_t nkey, const int flags, const int nbytes) {
-    char prefix[40];
-    uint8_t nsuffix;
-
-    return slabs_clsid(item_make_header(nkey + 1, flags, nbytes,
-                                        prefix, &nsuffix)) != 0;
-}
-
-static void item_link_q(item *it) { /* item is the new head */
-    item **head, **tail;
+static void item_link_q(slab_item *it) { /* item is the new head */
+    slab_item **head, **tail;
     /* always true, warns: assert(it->slabs_clsid <= LARGEST_ID); */
-    assert((it->it_flags & ITEM_SLABBED) == 0);
+    assert((it->item.iflag & ITEM_SLABBED) == 0);
 
     head = &heads[it->slabs_clsid];
     tail = &tails[it->slabs_clsid];
@@ -258,8 +249,8 @@ static void item_link_q(item *it) { /* item is the new head */
     return;
 }
 
-static void item_unlink_q(item *it) {
-    item **head, **tail;
+static void item_unlink_q(slab_item *it) {
+    slab_item **head, **tail;
     /* always true, warns: assert(it->slabs_clsid <= LARGEST_ID); */
     head = &heads[it->slabs_clsid];
     tail = &tails[it->slabs_clsid];
@@ -281,60 +272,61 @@ static void item_unlink_q(item *it) {
     return;
 }
 
-int do_item_link(item *it) {
-    MEMCACHED_ITEM_LINK(ITEM_key(it), it->nkey, it->nbytes);
-    assert((it->it_flags & (ITEM_LINKED|ITEM_SLABBED)) == 0);
-    assert(it->nbytes < (1024 * 1024));  /* 1MB max size */
-    it->it_flags |= ITEM_LINKED;
+int do_item_link(struct slabber_engine *se, slab_item *it) {
+    MEMCACHED_ITEM_LINK(ITEM_key(&it->item), it->item.nkey, it->item.nbytes);
+    assert((it->item.iflag & (ITEM_LINKED|ITEM_SLABBED)) == 0);
+    assert(it->item.nbytes < (1024 * 1024));  /* 1MB max size */
+    it->item.iflag |= ITEM_LINKED;
     it->time = current_time;
     assoc_insert(it);
 
-    STATS_LOCK();
-    stats.curr_bytes += ITEM_ntotal(it);
-    stats.curr_items += 1;
-    stats.total_items += 1;
-    STATS_UNLOCK();
+    pthread_mutex_lock(&se->stats.lock);
+    se->stats.curr_bytes += ITEM_ntotal(it);
+    se->stats.curr_items++;
+    se->stats.total_items++;
+    pthread_mutex_unlock(&se->stats.lock);
 
     /* Allocate a new CAS ID on link. */
-    ITEM_set_cas(it, (settings.use_cas) ? get_cas_id() : 0);
-
+    ITEM_set_cas(&it->item, (se->config.use_cas) ? get_cas_id() : 0);
     item_link_q(it);
 
     return 1;
 }
 
-void do_item_unlink(item *it) {
-    MEMCACHED_ITEM_UNLINK(ITEM_key(it), it->nkey, it->nbytes);
-    if ((it->it_flags & ITEM_LINKED) != 0) {
-        it->it_flags &= ~ITEM_LINKED;
-        STATS_LOCK();
-        stats.curr_bytes -= ITEM_ntotal(it);
-        stats.curr_items -= 1;
-        STATS_UNLOCK();
-        assoc_delete(ITEM_key(it), it->nkey);
+void do_item_unlink(struct slabber_engine *se, slab_item *it) {
+    MEMCACHED_ITEM_UNLINK(ITEM_key(&it->item), it->item.nkey, it->item.nbytes);
+    if ((it->item.iflag & ITEM_LINKED) != 0) {
+        it->item.iflag &= ~ITEM_LINKED;
+
+        pthread_mutex_lock(&se->stats.lock);
+        se->stats.curr_bytes -= ITEM_ntotal(it);
+        se->stats.curr_items--;
+        pthread_mutex_unlock(&se->stats.lock);
+
+        assoc_delete(ITEM_key(&it->item), it->item.nkey);
         item_unlink_q(it);
-        if (it->refcount == 0) item_free(it);
+        if (it->refcount == 0) item_free(se, it);
     }
 }
 
-void do_item_remove(item *it) {
-    MEMCACHED_ITEM_REMOVE(ITEM_key(it), it->nkey, it->nbytes);
-    assert((it->it_flags & ITEM_SLABBED) == 0);
+void do_item_remove(struct slabber_engine *se, slab_item *it) {
+    MEMCACHED_ITEM_REMOVE(ITEM_key(&it->item), it->item.nkey, it->item.nbytes);
+    assert((it->item.iflag & ITEM_SLABBED) == 0);
     if (it->refcount != 0) {
         it->refcount--;
         DEBUG_REFCNT(it, '-');
     }
-    if (it->refcount == 0 && (it->it_flags & ITEM_LINKED) == 0) {
-        item_free(it);
+    if (it->refcount == 0 && (it->item.iflag & ITEM_LINKED) == 0) {
+        item_free(se, it);
     }
 }
 
-void do_item_update(item *it) {
-    MEMCACHED_ITEM_UPDATE(ITEM_key(it), it->nkey, it->nbytes);
+void do_item_update(struct slabber_engine *se, slab_item *it) {
+    MEMCACHED_ITEM_UPDATE(ITEM_key(&it->item), it->item.nkey, it->item.nbytes);
     if (it->time < current_time - ITEM_UPDATE_INTERVAL) {
-        assert((it->it_flags & ITEM_SLABBED) == 0);
+        assert((it->item.iflag & ITEM_SLABBED) == 0);
 
-        if ((it->it_flags & ITEM_LINKED) != 0) {
+        if ((it->item.iflag & ITEM_LINKED) != 0) {
             item_unlink_q(it);
             it->time = current_time;
             item_link_q(it);
@@ -342,21 +334,22 @@ void do_item_update(item *it) {
     }
 }
 
-int do_item_replace(item *it, item *new_it) {
-    MEMCACHED_ITEM_REPLACE(ITEM_key(it), it->nkey, it->nbytes,
-                           ITEM_key(new_it), new_it->nkey, new_it->nbytes);
-    assert((it->it_flags & ITEM_SLABBED) == 0);
+int do_item_replace(struct slabber_engine *se, slab_item *it, slab_item *new_it) {
+    MEMCACHED_ITEM_REPLACE(ITEM_key(&it->item), it->item.nkey, it->item.nbytes,
+                           ITEM_key(new_it), new_it->item.nkey, new_it->item.nbytes);
+    assert((it->item.iflag & ITEM_SLABBED) == 0);
 
-    do_item_unlink(it);
-    return do_item_link(new_it);
+    do_item_unlink(se, it);
+    return do_item_link(se, new_it);
 }
 
 /*@null@*/
 char *do_item_cachedump(const unsigned int slabs_clsid, const unsigned int limit, unsigned int *bytes) {
+#if 0
     unsigned int memlimit = 2 * 1024 * 1024;   /* 2MB max response size */
     char *buffer;
     unsigned int bufcurr;
-    item *it;
+    slab_item *it;
     unsigned int len;
     unsigned int shown = 0;
     char key_temp[KEY_MAX_LENGTH + 1];
@@ -370,13 +363,13 @@ char *do_item_cachedump(const unsigned int slabs_clsid, const unsigned int limit
     bufcurr = 0;
 
     while (it != NULL && (limit == 0 || shown < limit)) {
-        assert(it->nkey <= KEY_MAX_LENGTH);
+        assert(it->item.nkey <= KEY_MAX_LENGTH);
         /* Copy the key since it may not be null-terminated in the struct */
-        strncpy(key_temp, ITEM_key(it), it->nkey);
-        key_temp[it->nkey] = 0x00; /* terminate */
+        strncpy(key_temp, ITEM_key(&it->item), it->item.nkey);
+        key_temp[it->item.nkey] = 0x00; /* terminate */
         len = snprintf(temp, sizeof(temp), "ITEM %s [%d b; %lu s]\r\n",
-                       key_temp, it->nbytes - 2,
-                       (unsigned long)it->exptime + process_started);
+                       key_temp, it->item.nbytes - 2,
+                       (unsigned long)it->item.exptime + process_started);
         if (bufcurr + len + 6 > memlimit)  /* 6 is END\r\n\0 */
             break;
         strcpy(buffer + bufcurr, temp);
@@ -390,9 +383,30 @@ char *do_item_cachedump(const unsigned int slabs_clsid, const unsigned int limit
 
     *bytes = bufcurr;
     return buffer;
+#endif
+    return NULL;
 }
 
-void do_item_stats(ADD_STAT add_stats, void *c) {
+/** Append a simple stat with a stat name, value format and value */
+#define APPEND_STAT(name, fmt, val) \
+    append_stat(name, add_stats, c, fmt, val);
+
+/** Append an indexed stat with a stat name (with format), value format
+    and value */
+#define APPEND_NUM_FMT_STAT(name_fmt, num, name, fmt, val)   \
+    klen = sprintf(key_str, name_fmt, num, name);            \
+    vlen = sprintf(val_str, fmt, val);                       \
+    add_stats(key_str, klen, val_str, vlen, c);
+
+/** Common APPEND_NUM_FMT_STAT format. */
+#define APPEND_NUM_STAT(num, name, fmt, val) \
+    APPEND_NUM_FMT_STAT("%d:%s", num, name, fmt, val)
+
+extern void append_stat(const char *name, ADD_STAT add_stats, const void *c,
+                        const char *fmt, ...);
+
+
+void do_item_stats(ADD_STAT add_stats, const void *c) {
     int i;
     for (i = 0; i < LARGEST_ID; i++) {
         if (tails[i] != NULL) {
@@ -413,15 +427,13 @@ void do_item_stats(ADD_STAT add_stats, void *c) {
                                 "%u", itemstats[i].tailrepairs);;
         }
     }
-
     /* getting here means both ascii and binary terminators fit */
     add_stats(NULL, 0, NULL, 0, c);
 }
 
 /** dumps out a list of objects of each size, with granularity of 32 bytes */
 /*@null@*/
-void do_item_stats_sizes(ADD_STAT add_stats, void *c) {
-
+void do_item_stats_sizes(ADD_STAT add_stats, const void *c) {
     /* max 1MB object, divided into 32 bytes size buckets */
     const int num_buckets = 32768;
     unsigned int *histogram = calloc(num_buckets, sizeof(int));
@@ -431,7 +443,7 @@ void do_item_stats_sizes(ADD_STAT add_stats, void *c) {
 
         /* build the histogram */
         for (i = 0; i < LARGEST_ID; i++) {
-            item *iter = heads[i];
+            slab_item *iter = heads[i];
             while (iter) {
                 int ntotal = ITEM_ntotal(iter);
                 int bucket = ntotal / 32;
@@ -457,22 +469,22 @@ void do_item_stats_sizes(ADD_STAT add_stats, void *c) {
 }
 
 /** wrapper around assoc_find which does the lazy expiration logic */
-item *do_item_get(const char *key, const size_t nkey) {
-    item *it = assoc_find(key, nkey);
+slab_item *do_item_get(struct slabber_engine *se, const char *key, const size_t nkey) {
+    slab_item *it = assoc_find(key, nkey);
     int was_found = 0;
 
-    if (settings.verbose > 2) {
+    if (se->config.verbose > 2) {
         if (it == NULL) {
             fprintf(stderr, "> NOT FOUND %s", key);
         } else {
-            fprintf(stderr, "> FOUND KEY %s", ITEM_key(it));
+            fprintf(stderr, "> FOUND KEY %s", ITEM_key(&it->item));
             was_found++;
         }
     }
 
-    if (it != NULL && settings.oldest_live != 0 && settings.oldest_live <= current_time &&
-        it->time <= settings.oldest_live) {
-        do_item_unlink(it);           /* MTSAFE - cache_lock held */
+    if (it != NULL && se->config.oldest_live != 0 && se->config.oldest_live <= current_time &&
+        it->time <= se->config.oldest_live) {
+        do_item_unlink(se, it);           /* MTSAFE - cache_lock held */
         it = NULL;
     }
 
@@ -481,8 +493,8 @@ item *do_item_get(const char *key, const size_t nkey) {
         was_found--;
     }
 
-    if (it != NULL && it->exptime != 0 && it->exptime <= current_time) {
-        do_item_unlink(it);           /* MTSAFE - cache_lock held */
+    if (it != NULL && it->item.exptime != 0 && it->item.exptime <= current_time) {
+        do_item_unlink(se, it);           /* MTSAFE - cache_lock held */
         it = NULL;
     }
 
@@ -496,15 +508,15 @@ item *do_item_get(const char *key, const size_t nkey) {
         DEBUG_REFCNT(it, '+');
     }
 
-    if (settings.verbose > 2)
+    if (se->config.verbose > 2)
         fprintf(stderr, "\n");
 
     return it;
 }
 
 /** returns an item whether or not it's expired. */
-item *do_item_get_nocheck(const char *key, const size_t nkey) {
-    item *it = assoc_find(key, nkey);
+slab_item *do_item_get_nocheck(const char *key, const size_t nkey) {
+    slab_item *it = assoc_find(key, nkey);
     if (it) {
         it->refcount++;
         DEBUG_REFCNT(it, '+');
@@ -513,10 +525,10 @@ item *do_item_get_nocheck(const char *key, const size_t nkey) {
 }
 
 /* expires items that are more recent than the oldest_live setting. */
-void do_item_flush_expired(void) {
+void do_item_flush_expired(struct slabber_engine *se) {
     int i;
-    item *iter, *next;
-    if (settings.oldest_live == 0)
+    slab_item *iter, *next;
+    if (se->config.oldest_live == 0)
         return;
     for (i = 0; i < LARGEST_ID; i++) {
         /* The LRU is sorted in decreasing time order, and an item's timestamp
@@ -525,10 +537,10 @@ void do_item_flush_expired(void) {
          * The oldest_live checking will auto-expire the remaining items.
          */
         for (iter = heads[i]; iter != NULL; iter = next) {
-            if (iter->time >= settings.oldest_live) {
+            if (iter->time >= se->config.oldest_live) {
                 next = iter->next;
-                if ((iter->it_flags & ITEM_SLABBED) == 0) {
-                    do_item_unlink(iter);
+                if ((iter->item.iflag & ITEM_SLABBED) == 0) {
+                    do_item_unlink(se, iter);
                 }
             } else {
                 /* We've hit the first old item. Continue to the next queue. */

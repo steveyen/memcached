@@ -149,6 +149,9 @@ sub new_memcached {
     if (supports_udp()) {
         $args .= " -U $udpport";
     }
+
+    $args .= " -E $builddir/../plugin/slab/.libs/libmemcachedslab.so";
+
     if ($< == 0) {
         $args .= " -u root";
     }
