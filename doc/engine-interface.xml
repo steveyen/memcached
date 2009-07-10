@@ -82,6 +82,8 @@
                         </t>
                         <t hangText="ENGINE_E2BIG">The data is too big for the engine
                         </t>
+                        <t hangText="ENGINE_WANT_MORE">The engine will block,
+                        but can accept more data before blocking</t>
                     </list>
                 </t>
             </section>
@@ -264,6 +266,10 @@ typedef struct engine_interface_v1 {
                                   int nkey,
                                   ADD_STAT add_stat);
    void (*reset_stats)(ENGINE_HANDLE* handle);
+   ENGINE_ERROR_CODE (*unknow_command)(ENGINE_HANDLE* handle,
+                const void* cookie,
+                protocol_binary_request_header *request,
+                ADD_RESPONSE response);
 } ENGINE_HANDLE_V1;
                 </artwork>
             </figure>
@@ -537,6 +543,58 @@ void (*reset_stats)(ENGINE_HANDLE* handle);
                 <t>
                     <list hangIndent="20" style="hanging">
                         <t hangText="handle">Pointer to the engine</t>
+                    </list>
+                </t>
+            </section>
+            <section anchor="unknown_command" title="unknown_command">
+                <t>
+                    The frontend received an unknown command that might be
+                    engine specific.
+                </t>
+                <t>
+                    <figure>
+                        <artwork>
+ENGINE_ERROR_CODE (*unknow_command)(ENGINE_HANDLE* handle,
+                     const void* cookie,
+                     protocol_binary_request_header *request,
+                     ADD_RESPONSE response);
+                        </artwork>
+                    </figure>
+                </t>
+                <t>
+                    <list hangIndent="20" style="hanging">
+                        <t hangText="handle">Pointer to the engine</t>
+                        <t hangText="cookie">Cookie for the engine that MUST be provided as the cookie in the callback to the server</t>
+                        <t hangText="request">Pointer to the request header (the rest of the data will follow). The header is converted to host byte order</t>
+                        <t hangText="response">Function to add a packet to the return stream</t>
+                    </list>
+                </t>
+                <t>
+                    Details on the response function is as follows:
+                </t>
+                <t>
+                    <figure>
+                        <artwork>
+typedef void (*ADD_RESPONSE)(const void *key, uint16_t keylen,
+                             const void *ext, uint8_t extlen,
+                             const void *body, uint32_t bodylen,
+                             uint8_t datatype, uint16_t status,
+                             uint64_t cas, const void *cookie);
+                        </artwork>
+                    </figure>
+                </t>
+                <t>
+                    <list hangIndent="20" style="hanging">
+                        <t hangText="key">Key to put in the response (may be NULL)</t>
+                        <t hangText="keylen">The length of the key</t>
+                        <t hangText="ext">Data to put in the extra field in the response</t>
+                        <t hangText="extlen">The length of the extra data</t>
+                        <t hangText="body">The data to put in the body of the response</t>
+                        <t hangText="bodylen">The lenght of the body</t>
+                        <t hangText="datatype">Currently unused. Should be 0</t>
+                        <t hangText="status">Type of response. See protocol_binary.h for legal values</t>
+                        <t hangText="cas">CAS value of the response message (Should be 0 if cas isn't used)</t>
+                        <t hangText="cookie">Cookie provided by the engine</t>
                     </list>
                 </t>
             </section>

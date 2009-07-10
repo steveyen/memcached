@@ -56,7 +56,10 @@ static ENGINE_ERROR_CODE slabber_flush(ENGINE_HANDLE* handle,
                                        const void* cookie, time_t when);
 static ENGINE_ERROR_CODE initalize_configuration(struct config *config, 
                                                  const char *cfg_str);
-
+static ENGINE_ERROR_CODE slabber_unknown_command(ENGINE_HANDLE* handle,
+                                                 const void* cookie,
+                                                 protocol_binary_request_header *request,
+                                                 ADD_RESPONSE response);
 
 ENGINE_ERROR_CODE create_instance(uint64_t interface,
                                   ENGINE_HANDLE **handle) {
@@ -83,6 +86,7 @@ ENGINE_ERROR_CODE create_instance(uint64_t interface,
    slab_engine->engine.store = slabber_store;
    slab_engine->engine.arithmetic = slabber_arithmetic;
    slab_engine->engine.flush = slabber_flush;
+   slab_engine->engine.unknow_command = slabber_unknown_command;
 
 
    *handle = (ENGINE_HANDLE*) & slab_engine->engine;
@@ -558,3 +562,10 @@ static ENGINE_ERROR_CODE initalize_configuration(struct config *config,
    return ret;
 }
 
+static ENGINE_ERROR_CODE slabber_unknown_command(ENGINE_HANDLE* handle,
+                                                 const void* cookie,
+                                                 protocol_binary_request_header *request,
+                                                 ADD_RESPONSE response)
+{
+    return ENGINE_ENOTSUP;
+}

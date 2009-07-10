@@ -5,6 +5,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "memcached/protocol_binary.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -20,7 +22,9 @@ extern "C" {
       ENGINE_EINVAL = 0x05, /* Invalid arguments */
       ENGINE_ENOTSUP = 0x06, /* The engine does not support this */
       ENGINE_EWOULDBLOCK = 0x07, /* This would cause the engine to block */
-      ENGINE_E2BIG = 0x08 /* The data is too big for the engine */
+      ENGINE_E2BIG = 0x08, /* The data is too big for the engine */
+      ENGINE_WANT_MORE = 0x09 /* The engine want more data if the frontend
+                               * have more data available. */
    } ENGINE_ERROR_CODE;
 
    typedef enum {
@@ -71,6 +75,26 @@ extern "C" {
    typedef void (*ADD_STAT)(const char *key, const uint16_t klen,
                             const char *val, const uint32_t vlen,
                             const void *cookie);
+
+   /**
+    * Callback for adding a response backet
+    * @param key The key to put in the response
+    * @param keylen The length of the key
+    * @param ext The data to put in the extended field in the response
+    * @param extlen The number of bytes in the ext field
+    * @param body The data body
+    * @param bodylen The number of bytes in the body
+    * @param datatype This is currently not used and should be set to 0
+    * @param status The status code of the return packet (see in protocol_binary
+    *               for the legal values)
+    * @param cas The cas to put in the return packet
+    * @param cookie The cookie provided by the frontend
+    */
+   typedef void (*ADD_RESPONSE)(const void *key, uint16_t keylen,
+                                const void *ext, uint8_t extlen,
+                                const void *body, uint32_t bodylen,
+                                uint8_t datatype, uint16_t status,
+                                uint64_t cas, const void *cookie);
 
    typedef struct engine_interface{
       uint64_t interface; /* The version number on the following structure */
@@ -148,6 +172,10 @@ extern "C" {
                                    int nkey,
                                    ADD_STAT add_stat);
     void (*reset_stats)(ENGINE_HANDLE* handle);
+    ENGINE_ERROR_CODE (*unknow_command)(ENGINE_HANDLE* handle,
+                                        const void* cookie,
+                                        protocol_binary_request_header *request,
+                                        ADD_RESPONSE response);
   } ENGINE_HANDLE_V1;
  
 #ifdef __cplusplus
