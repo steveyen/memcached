@@ -102,30 +102,6 @@
 #define APPEND_NUM_STAT(num, name, fmt, val) \
     APPEND_NUM_FMT_STAT("%d:%s", num, name, fmt, val)
 
-
-/*
- * NOTE: If you modify this table you _MUST_ update the function state_text
- */
-/**
- * Possible states of a connection.
- */
-enum conn_states {
-    conn_listening,  /**< the socket which listens for connections */
-    conn_new_cmd,    /**< Prepare connection for next command */
-    conn_waiting,    /**< waiting for a readable socket */
-    conn_read,       /**< reading in a command line */
-    conn_parse_cmd,  /**< try to parse a command from the input buffer */
-    conn_write,      /**< writing out a simple response */
-    conn_nread,      /**< reading in a fixed number of bytes */
-    conn_swallow,    /**< swallowing unnecessary bytes w/o storing */
-    conn_closing,    /**< closing this connection */
-    conn_mwrite,     /**< writing out many items sequentially */
-    conn_create_tap_connect, /**< Create the tap command message */
-    conn_ship_log, /**< Ship replication log */
-    conn_add_tap_client, /**< Move the tap client into the tap thread */
-    conn_max_state   /**< Max state value (used for assertion) */
-};
-
 enum bin_substates {
     bin_no_state,
     bin_reading_set_header,
@@ -309,7 +285,7 @@ typedef struct conn conn;
 struct conn {
     int    sfd;
     sasl_conn_t *sasl_conn;
-    enum conn_states  state;
+    int (*state)(conn *c, int *nreq);
     enum bin_substates substate;
     struct event event;
     short  ev_flags;
@@ -325,7 +301,7 @@ struct conn {
     int    wsize;
     int    wbytes;
     /** which state to go into after finishing current write */
-    enum conn_states  write_and_go;
+    int (*write_and_go)(conn *c, int *nreq);
     void   *write_and_free; /** free this memory after finishing writing */
 
     char   *ritem;  /** when we read in an item's value, it goes here */
@@ -407,10 +383,28 @@ struct conn {
     TAP_ITERATOR tap_iterator;
 };
 
+/* connection state machine */
+int conn_listening(conn *c, int *nreq);
+int conn_new_cmd(conn *c, int *nreq);
+int conn_waiting(conn *c, int *nreq);
+int conn_read(conn *c, int *nreq);
+int conn_parse_cmd(conn *c, int *nreq);
+int conn_write(conn *c, int *nreq);
+int conn_nread(conn *c, int *nreq);
+int conn_swallow(conn *c, int *nreq);
+int conn_closing(conn *c, int *nreq);
+int conn_mwrite(conn *c, int *nreq);
+int conn_create_tap_connect(conn *c, int *nreq);
+int conn_ship_log(conn *c, int *nreq);
+int conn_add_tap_client(conn *c, int *nreq);
+
 /*
  * Functions
  */
-conn *conn_new(const int sfd, const enum conn_states init_state, const int event_flags, const int read_buffer_size, enum network_transport transport, struct event_base *base);
+conn *conn_new(const int sfd, int (*init_state)(conn *c, int *nreq),
+               const int event_flags,
+               const int read_buffer_size, enum network_transport transport,
+               struct event_base *base);
 extern int daemonize(int nochdir, int noclose);
 
 
@@ -430,7 +424,9 @@ void thread_init(int nthreads, struct event_base *main_base);
 void threads_shutdown(void);
 
 int  dispatch_event_add(int thread, conn *c);
-void dispatch_conn_new(int sfd, enum conn_states init_state, int event_flags, int read_buffer_size, enum network_transport transport);
+void dispatch_conn_new(int sfd, int (*init_state)(conn *c, int *nreq),
+                       int event_flags, int read_buffer_size,
+                       enum network_transport transport);
 
 /* Lock wrappers for cache functions that are called from main loop. */
 void accept_new_conns(const bool do_accept);
