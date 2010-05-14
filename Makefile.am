@@ -72,7 +72,6 @@ memcached_DEPENDENCIES =
 
 CLEANFILES=
 
-
 if BUILD_DTRACE
 BUILT_SOURCES += memcached_dtrace.h
 CLEANFILES += memcached_dtrace.h
@@ -86,6 +85,7 @@ endif
 
 lib_LTLIBRARIES = default_engine.la \
                   example_protocol.la \
+                  proxy_extension.la \
                   stdin_term_handler.la
 
 noinst_LTLIBRARIES=libmcd_util.la
@@ -109,6 +109,9 @@ stdin_term_handler_la_LDFLAGS= -module -dynamic
 
 example_protocol_la_SOURCES= example_protocol.c example_protocol.h
 example_protocol_la_LDFLAGS= -module -dynamic
+
+proxy_extension_la_SOURCES= proxy_extension.c proxy_extension.h
+proxy_extension_la_LDFLAGS= -module -dynamic
 
 if INCLUDE_DEFAULT_ENGINE
 memcached_SOURCES += $(default_engine_la_SOURCES)

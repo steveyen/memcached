@@ -249,6 +249,7 @@ struct settings {
         EXTENSION_DAEMON_DESCRIPTOR *daemons;
         EXTENSION_LOGGER_DESCRIPTOR *logger;
         EXTENSION_ASCII_PROTOCOL_DESCRIPTOR *ascii;
+        EXTENSION_ASCII_PROTOCOL_DESCRIPTOR *ascii_before;
     } extensions;
 };
 
@@ -392,7 +393,6 @@ struct conn {
     /** Current ascii protocol */
     EXTENSION_ASCII_PROTOCOL_DESCRIPTOR *ascii_cmd;
 
-
     /* Binary protocol stuff */
     /* This is where the binary header goes */
     protocol_binary_request_header binary_header;
@@ -413,7 +413,6 @@ struct conn {
  */
 conn *conn_new(const int sfd, const enum conn_states init_state, const int event_flags, const int read_buffer_size, enum network_transport transport, struct event_base *base);
 extern int daemonize(int nochdir, int noclose);
-
 
 #include "stats.h"
 #include "trace.h"

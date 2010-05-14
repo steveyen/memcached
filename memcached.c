@@ -1307,7 +1307,6 @@ static void write_bin_response(conn *c, void *d, int hlen, int keylen, int dlen)
     }
 }
 
-
 static void complete_incr_bin(conn *c) {
     protocol_binary_response_incr* rsp = (protocol_binary_response_incr*)c->wbuf;
     protocol_binary_request_incr* req = binary_get_request(c);
@@ -3089,18 +3088,28 @@ static bool ascii_response_handler(const void *cookie,
     return true;
 }
 
+static void ascii_cmd_execute(conn *c, EXTENSION_ASCII_PROTOCOL_DESCRIPTOR *cmd,
+                              size_t ntokens, token_t *tokens) {
+    ENGINE_ERROR_CODE ret = cmd->execute(cmd->cookie, c, ntokens, tokens,
+                                         ascii_response_handler);
+    if (ret == ENGINE_DISCONNECT ||
+        ret == ENGINE_EACCESS ||
+        ret == ENGINE_FAILED) {
+        conn_set_state(c, conn_closing);
+    } else if (ret == ENGINE_EWOULDBLOCK) {
+        c->ewouldblock = true;
+    } else if (c->dynamic_buffer.buffer != NULL) {
+        write_and_free(c, c->dynamic_buffer.buffer,
+                       c->dynamic_buffer.offset);
+        c->dynamic_buffer.buffer = NULL;
+    } else {
+        conn_set_state(c, conn_new_cmd);
+    }
+}
+
 static void complete_nread_ascii(conn *c) {
     if (c->ascii_cmd != NULL) {
-        if (!c->ascii_cmd->execute(c->ascii_cmd->cookie, c, 0, NULL,
-                                   ascii_response_handler)) {
-            conn_set_state(c, conn_closing);
-        } else if (c->dynamic_buffer.buffer != NULL) {
-            write_and_free(c, c->dynamic_buffer.buffer,
-                           c->dynamic_buffer.offset);
-            c->dynamic_buffer.buffer = NULL;
-        } else {
-            conn_set_state(c, conn_new_cmd);
-        }
+        ascii_cmd_execute(c, c->ascii_cmd, 0, NULL);
     } else {
         complete_update_ascii(c);
     }
@@ -3451,6 +3460,12 @@ static void process_stat_settings(ADD_STAT add_stats, void *c) {
          ptr != NULL;
          ptr = ptr->next) {
         APPEND_STAT("ascii_extension", "%s", ptr->get_name(ptr->cookie));
+    }
+
+    for (EXTENSION_ASCII_PROTOCOL_DESCRIPTOR *ptr = settings.extensions.ascii_before;
+         ptr != NULL;
+         ptr = ptr->next) {
+        APPEND_STAT("ascii_before_extension", "%s", ptr->get_name(ptr->cookie));
     }
 }
 
@@ -3989,7 +4004,6 @@ static void process_verbosity_command(conn *c, token_t *tokens, const size_t nto
 }
 
 static void process_command(conn *c, char *command) {
-
     token_t tokens[MAX_TOKENS];
     size_t ntokens;
     int comm;
@@ -4017,6 +4031,48 @@ static void process_command(conn *c, char *command) {
     }
 
     ntokens = tokenize_command(command, tokens, MAX_TOKENS);
+
+    if (settings.extensions.ascii_before != NULL) {
+        EXTENSION_ASCII_PROTOCOL_DESCRIPTOR *cmd;
+        size_t nbytes = 0;
+        size_t ntoks = ntokens;
+        char *ptr;
+
+        if (ntoks > 0) {
+            if (ntoks == MAX_TOKENS) {
+                out_string(c, "ERROR too many arguments");
+                return;
+            }
+
+            if (tokens[ntoks - 1].length == 0) {
+                --ntoks;
+            }
+        }
+
+        for (cmd = settings.extensions.ascii_before; cmd != NULL; cmd = cmd->next) {
+            if (cmd->accept(cmd->cookie, c, ntoks, tokens, &nbytes, &ptr)) {
+                break;
+            }
+        }
+
+        if (cmd != NULL) {
+            if (nbytes == 0) {
+                ascii_cmd_execute(c, cmd, ntoks, tokens);
+            } else {
+                c->rlbytes = nbytes;
+                c->ritem = ptr;
+                c->ascii_cmd = cmd;
+                /* NOT SUPPORTED YET! */
+                conn_set_state(c, conn_nread);
+            }
+
+            return;
+        }
+
+        // Else, fall-through, if the ascii before extension didn't
+        // handle the cmd.
+    }
+
     if (ntokens >= 3 &&
         ((strcmp(tokens[COMMAND_TOKEN].value, "get") == 0) ||
          (strcmp(tokens[COMMAND_TOKEN].value, "bget") == 0))) {
@@ -4096,21 +4152,22 @@ static void process_command(conn *c, char *command) {
     } else if (settings.extensions.ascii != NULL) {
         EXTENSION_ASCII_PROTOCOL_DESCRIPTOR *cmd;
         size_t nbytes = 0;
+        size_t ntoks = ntokens;
         char *ptr;
 
-        if (ntokens > 0) {
-            if (ntokens == MAX_TOKENS) {
+        if (ntoks > 0) {
+            if (ntoks == MAX_TOKENS) {
                 out_string(c, "ERROR too many arguments");
                 return;
             }
 
-            if (tokens[ntokens - 1].length == 0) {
-                --ntokens;
+            if (tokens[ntoks - 1].length == 0) {
+                --ntoks;
             }
         }
 
         for (cmd = settings.extensions.ascii; cmd != NULL; cmd = cmd->next) {
-            if (cmd->accept(cmd->cookie, c, ntokens, tokens, &nbytes, &ptr)) {
+            if (cmd->accept(cmd->cookie, c, ntoks, tokens, &nbytes, &ptr)) {
                 break;
             }
         }
@@ -4118,18 +4175,7 @@ static void process_command(conn *c, char *command) {
         if (cmd == NULL) {
             out_string(c, "ERROR unknown command");
         } else if (nbytes == 0) {
-            if (!cmd->execute(cmd->cookie, c, ntokens, tokens,
-                              ascii_response_handler)) {
-                conn_set_state(c, conn_closing);
-            } else {
-                if (c->dynamic_buffer.buffer != NULL) {
-                    write_and_free(c, c->dynamic_buffer.buffer,
-                                   c->dynamic_buffer.offset);
-                    c->dynamic_buffer.buffer = NULL;
-                } else {
-                    conn_set_state(c, conn_new_cmd);
-                }
-            }
+            ascii_cmd_execute(c, cmd, ntoks, tokens);
         } else {
             c->rlbytes = nbytes;
             c->ritem = ptr;
@@ -4581,12 +4627,16 @@ void drive_machine(conn *c) {
             }
             break;
 
-        case conn_parse_cmd :
+        case conn_parse_cmd:
+            c->ewouldblock = false;
             if (try_read_command(c) == 0) {
                 /* wee need more data! */
                 conn_set_state(c, conn_waiting);
             }
-
+            if (c->ewouldblock) {
+                event_del(&c->event);
+                stop = 1;
+            }
             break;
 
         case conn_new_cmd:
@@ -5733,9 +5783,15 @@ static bool register_extension(extension_type_t type, void *extension)
         settings.extensions.logger = extension;
         return true;
     case EXTENSION_ASCII_PROTOCOL:
-        if (settings.extensions.ascii != NULL) {
+    case EXTENSION_ASCII_PROTOCOL_BEFORE: {
+        EXTENSION_ASCII_PROTOCOL_DESCRIPTOR **head;
+        if (type == EXTENSION_ASCII_PROTOCOL)
+            head = &settings.extensions.ascii;
+        else
+            head = &settings.extensions.ascii_before;
+        if (*head != NULL) {
             EXTENSION_ASCII_PROTOCOL_DESCRIPTOR *last;
-            for (last = settings.extensions.ascii; last->next != NULL;
+            for (last = *head; last->next != NULL;
                  last = last->next) {
                 if (last == extension) {
                     return false;
@@ -5747,10 +5803,11 @@ static bool register_extension(extension_type_t type, void *extension)
             last->next = extension;
             last->next->next = NULL;
         } else {
-            settings.extensions.ascii = extension;
-            settings.extensions.ascii->next = NULL;
+            *head = extension;
+            (*head)->next = NULL;
         }
         return true;
+    }
 
     default:
         return false;
@@ -5795,9 +5852,16 @@ static void unregister_extension(extension_type_t type, void *extension)
         }
         break;
     case EXTENSION_ASCII_PROTOCOL:
+    case EXTENSION_ASCII_PROTOCOL_BEFORE:
         {
+            EXTENSION_ASCII_PROTOCOL_DESCRIPTOR **head;
+            if (type == EXTENSION_ASCII_PROTOCOL)
+                head = &settings.extensions.ascii;
+            else
+                head = &settings.extensions.ascii_before;
+
             EXTENSION_ASCII_PROTOCOL_DESCRIPTOR *prev = NULL;
-            EXTENSION_ASCII_PROTOCOL_DESCRIPTOR *ptr = settings.extensions.ascii;
+            EXTENSION_ASCII_PROTOCOL_DESCRIPTOR *ptr = *head;
 
             while (ptr != NULL && ptr != extension) {
                 prev = ptr;
@@ -5808,8 +5872,8 @@ static void unregister_extension(extension_type_t type, void *extension)
                 prev->next = ptr->next;
             }
 
-            if (settings.extensions.ascii == ptr) {
-                settings.extensions.ascii = ptr->next;
+            if (*head == ptr) {
+                *head = ptr->next;
             }
         }
         break;
@@ -5817,7 +5881,6 @@ static void unregister_extension(extension_type_t type, void *extension)
     default:
         ;
     }
-
 }
 
 /**
@@ -5834,6 +5897,9 @@ static void* get_extension(extension_type_t type)
 
     case EXTENSION_ASCII_PROTOCOL:
         return settings.extensions.ascii;
+
+    case EXTENSION_ASCII_PROTOCOL_BEFORE:
+        return settings.extensions.ascii_before;
 
     default:
         return NULL;
@@ -6286,7 +6352,6 @@ int main (int argc, char **argv) {
          * the soft limit ends up 0, because then no core files will be
          * created at all.
          */
-
         if ((getrlimit(RLIMIT_CORE, &rlim) != 0) || rlim.rlim_cur == 0) {
             settings.extensions.logger->log(EXTENSION_LOG_WARNING, NULL,
                     "failed to ensure corefile creation\n");

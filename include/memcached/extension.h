@@ -43,7 +43,12 @@ extern "C" {
         /**
          * Command extension for the ASCII protocol
          */
-        EXTENSION_ASCII_PROTOCOL
+        EXTENSION_ASCII_PROTOCOL,
+        /**
+         * Command extension for the ASCII protocol, which is
+         * invoked before normal ASCII protocol processing.
+         */
+        EXTENSION_ASCII_PROTOCOL_BEFORE
     } extension_type_t;
 
     /**
@@ -166,12 +171,12 @@ extern "C" {
          * @return true if "success" or false if the client should be
          *              disconnected.
          */
-        bool (*execute)(const void *cmd_cookie,
-                        const void *cookie,
-                        int argc, token_t *argv,
-                        bool (*response_handler)(const void *cookie,
-                                                int nbytes,
-                                                const char *dta));
+        ENGINE_ERROR_CODE (*execute)(const void *cmd_cookie,
+                                     const void *cookie,
+                                     int argc, token_t *argv,
+                                     bool (*response_handler)(const void *cookie,
+                                                              int nbytes,
+                                                              const char *dta));
 
         /**
          * abort the command.
@@ -209,7 +214,6 @@ extern "C" {
      * @return one of the error codes above.
      */
     typedef EXTENSION_ERROR_CODE (*MEMCACHED_EXTENSIONS_INITIALIZE)(const char *config, GET_SERVER_API get_server_api);
-
 
     /**
      * The API provided by the server to manipulate the list of server

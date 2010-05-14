@@ -21,7 +21,6 @@ extern "C" {
          */
         rel_time_t (*realtime)(const time_t exptime);
 
-
         /**
          * Get the server's version number.
          *
@@ -85,7 +84,6 @@ extern "C" {
          * @return the socket file descriptor of the session for the given cookie.
          */
         int (*get_socket_fd)(const void *cookie);
-
 
         /**
          * Let a connection know that IO has completed.

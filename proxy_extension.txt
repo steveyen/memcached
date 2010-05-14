@@ -1,0 +1,72 @@
+high perf
+
+cross-platform
+- runs on windows and *nix
+
+memcapable
+- ascii protocol
+- binary protocol
+- quiet cmd non-corking
+- stable cmd ordering per upstream conn semantics
+- multiget scatter gather
+- quiet cmd scatter gather
+
+handles extended protocol cmds
+- ascii cmd extensions
+- binary cmd extensions
+- vbucket extensions
+-- redirect responses (with vbucket info)
+-- explicit vbucket params in cmds
+
+configurable
+- cmd-line configurable
+- config file configurable
+- dynamically re-configurable
+-- via REST streaming
+-- via file change watching
+-- via signals / SIGHUP
+
+protocol transformation
+- no transformation
+- ascii to ascii
+- binary to binary
+- ascii to binary
+- binary to ascii
+- heterogeneous upstreams
+- heterogeneous downstreams
+
+configurable hashing algorithm
+- vbucket
+
+high perf
+- in-process supports high perf, as a plugin/extension/engine in memcached core
+- streaming state machine
+-- separate state machines for sending and receiving
+-- pack as many bytes per transmit/receive as possible
+- low memory usage
+- knobs
+-- # worker threads
+-- # downstream conns per server
+- error handling
+-- timeouts
+-- throttling
+
+approaches
+- emoxi
+- moxi refresh
+- moxi as plugin
+- moxi 2.0
+
+-------
+upstream conn is assigned to a worker thread (memcached core).
+worker thread has a set of downstream conns.
+downstream conns are created dynamically.
+4 state machines & state...
+- upstream reader state
+-- enqueues onto a awaiting_downstream queue
+--- one awaiting_queue per downstream conn
+- upstream writer state
+- downstream writer state
+- downstream reader state
+
+
