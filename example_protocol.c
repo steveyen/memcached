@@ -66,8 +66,8 @@ static ENGINE_ERROR_CODE execute_command(const void *cmd_cookie, const void *coo
                                                                   int nbytes,
                                                                   const char *dta)) {
     if (cmd_cookie == &noop_descriptor) {
-        if (!response_handler(cookie, 4, "OK\r\n")) {
-            return ENGINE_FAILED;
+        if (response_handler(cookie, 4, "OK\r\n")) {
+            return ENGINE_SUCCESS;
         }
     } else {
         if (!response_handler(cookie, argv[0].length, argv[0].value)) {
