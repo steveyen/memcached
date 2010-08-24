@@ -165,6 +165,7 @@ static void register_callback(ENGINE_HANDLE *eh,
                               ENGINE_EVENT_TYPE type,
                               EVENT_CALLBACK cb, const void *cb_data);
 
+static HTGRAM_HANDLE new_htgram(void);
 
 enum try_read_result {
     READ_DATA_RECEIVED,
@@ -181,8 +182,10 @@ static void conn_set_state(conn *c, STATE_FUNC state);
 /* stats */
 static void stats_init(void);
 static void server_stats(ADD_STAT add_stats, conn *c, bool aggregate);
+static void server_timings(ADD_STAT add_stats, conn *c);
 static void process_stat_settings(ADD_STAT add_stats, void *c);
 
+void on_conn_write_done(conn *c);
 
 /* defaults */
 static void settings_init(void);
@@ -198,6 +201,7 @@ static int ensure_iov_space(conn *c);
 static int add_iov(conn *c, const void *buf, int len);
 static int add_msghdr(conn *c);
 
+static uint64_t usec_now(void);
 
 /* time handling */
 static void set_current_time(void);  /* update the global variable holding
@@ -612,6 +616,7 @@ conn *conn_new(const int sfd, STATE_FUNC init_state,
     c->msgcurr = 0;
     c->msgused = 0;
     c->next = NULL;
+    c->conn_parse_cmd_start = 0;
 
     c->write_and_go = init_state;
     c->write_and_free = 0;
@@ -1886,6 +1891,8 @@ static void process_bin_stat(conn *c) {
                 write_bin_packet(c, PROTOCOL_BINARY_RESPONSE_KEY_ENOENT, 0);
                 return;
             }
+        } else if (strncmp(subcommand, "timings", 7) == 0) {
+            server_timings(&append_stats, c);
         } else {
             ret = settings.engine.v1->get_stats(settings.engine.v0, c,
                                                 subcommand, nkey,
@@ -3633,6 +3640,48 @@ static void process_stat_settings(ADD_STAT add_stats, void *c) {
     }
 }
 
+struct htgram_dump_callback_data {
+    int      num_calls;
+    ADD_STAT add_stats;
+    conn    *conn;
+};
+
+static void htgram_dump_callback(HTGRAM_HANDLE h, const char *dump_line, void *cbdata) {
+    struct htgram_dump_callback_data *d = cbdata;
+
+    ADD_STAT add_stats = d->add_stats;
+    conn *c            = d->conn;
+
+    // Some clients expect a unique key in the "STAT <key> <rest of the line>" response.
+    //
+    char key[50];
+    snprintf(key, sizeof(key) - 1, "timings%03d", d->num_calls++);
+
+    APPEND_STAT(key, "%s", dump_line);
+}
+
+static void server_timings(ADD_STAT add_stats, conn *c) {
+    HTGRAM_HANDLE agg = new_htgram();
+    if (agg != NULL) {
+        struct thread_stats *thread_stats = get_independent_stats(c)->thread_stats;
+
+        for (int ii = 0; ii < settings.num_threads; ++ii) {
+            pthread_mutex_lock(&thread_stats[ii].mutex);
+            htgram_add(agg, thread_stats[ii].request_htgram);
+            pthread_mutex_unlock(&thread_stats[ii].mutex);
+        }
+
+        struct htgram_dump_callback_data cbdata;
+        cbdata.num_calls = 0;
+        cbdata.add_stats = add_stats;
+        cbdata.conn      = c;
+
+        htgram_dump(agg, htgram_dump_callback, &cbdata);
+
+        htgram_destroy(agg);
+    }
+}
+
 static void process_stat(conn *c, token_t *tokens, const size_t ntokens) {
     const char *subcommand = tokens[SUBCOMMAND_TOKEN].value;
     assert(c != NULL);
@@ -3695,6 +3744,8 @@ static void process_stat(conn *c, token_t *tokens, const size_t ntokens) {
             out_string(c, "ERROR");
             return;
         }
+    } else if (strncmp(subcommand, "timings", 7) == 0) {
+        server_timings(&append_stats, c);
     } else {
         /* getting here means that the subcommand is either engine specific or
            is invalid. query the engine and see. */
@@ -4800,6 +4851,7 @@ bool conn_read(conn *c) {
 }
 
 bool conn_parse_cmd(conn *c) {
+    c->conn_parse_cmd_start = usec_now();
     if (try_read_command(c) == 0) {
         /* wee need more data! */
         conn_set_state(c, conn_waiting);
@@ -5011,12 +5063,14 @@ bool conn_mwrite(conn *c) {
             } else {
                 conn_set_state(c, conn_new_cmd);
             }
+            on_conn_write_done(c);
         } else if (c->state == conn_write) {
             if (c->write_and_free) {
                 free(c->write_and_free);
                 c->write_and_free = 0;
             }
             conn_set_state(c, c->write_and_go);
+            on_conn_write_done(c);
         } else {
             if (settings.verbose > 0) {
                 settings.extensions.logger->log(EXTENSION_LOG_INFO, c,
@@ -5398,6 +5452,12 @@ static int server_socket_unix(const char *path, int access_mask) {
     return 0;
 }
 
+static uint64_t usec_now(void) {
+    struct timeval timer;
+    gettimeofday(&timer, NULL);
+    return ((timer.tv_sec - process_started) * 1000000) + timer.tv_usec;
+}
+
 static struct event clockevent;
 
 /* time-sensitive callers can call it by hand with this, outside the normal ever-1-second timer */
@@ -5685,14 +5745,24 @@ static int num_independent_stats(void) {
     return settings.num_threads + 1;
 }
 
+static HTGRAM_HANDLE new_htgram(void) {
+    // TODO: Make histogram bins more configurable one day.
+    //
+    HTGRAM_HANDLE h1 = htgram_mk(2000, 100, 2.0, 20, NULL);
+    HTGRAM_HANDLE h0 = htgram_mk(0, 100, 1.0, 20, h1);
+    return h0;
+}
+
 static void *new_independent_stats(void) {
     int ii;
     int nrecords = num_independent_stats();
     struct independent_stats *independent_stats = calloc(sizeof(independent_stats) + sizeof(struct thread_stats) * nrecords, 1);
     if (settings.topkeys > 0)
         independent_stats->topkeys = topkeys_init(settings.topkeys);
-    for (ii = 0; ii < nrecords; ii++)
+    for (ii = 0; ii < nrecords; ii++) {
         pthread_mutex_init(&independent_stats->thread_stats[ii].mutex, NULL);
+        independent_stats->thread_stats[ii].request_htgram = new_htgram();
+    }
     return independent_stats;
 }
 
@@ -5702,8 +5772,10 @@ static void release_independent_stats(void *stats) {
     struct independent_stats *independent_stats = stats;
     if (independent_stats->topkeys)
         topkeys_free(independent_stats->topkeys);
-    for (ii = 0; ii < nrecords; ii++)
+    for (ii = 0; ii < nrecords; ii++) {
         pthread_mutex_destroy(&independent_stats->thread_stats[ii].mutex);
+        htgram_destroy(independent_stats->thread_stats[ii].request_htgram);
+    }
     free(independent_stats);
 }
 
@@ -6760,3 +6832,15 @@ int main (int argc, char **argv) {
 
     return EXIT_SUCCESS;
 }
+
+void on_conn_write_done(conn *c) {
+    if (c->conn_parse_cmd_start > 0) {
+        struct thread_stats *thread_stats = get_thread_stats(c);
+        pthread_mutex_lock(&thread_stats->mutex);
+        htgram_incr(thread_stats->request_htgram,
+                    usec_now() - c->conn_parse_cmd_start, 1);
+        pthread_mutex_unlock(&thread_stats->mutex);
+    }
+    c->conn_parse_cmd_start = 0;
+}
+

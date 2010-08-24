@@ -73,7 +73,8 @@ memcached_SOURCES = \
                     thread.c \
                     topkeys.c \
                     topkeys.h \
-                    trace.h
+                    trace.h \
+                    htgram.c htgram.h
 memcached_LDFLAGS =-R '$(libdir)'
 memcached_CFLAGS = @PROFILER_FLAGS@
 memcached_DEPENDENCIES = libmcd_util.la

@@ -32,7 +32,7 @@
 #include "cache.h"
 #include "topkeys.h"
 #include "engine_loader.h"
-
+#include "htgram.h"
 #include "sasl_defs.h"
 
 /** Maximum length of a key. */
@@ -163,6 +163,7 @@ struct thread_stats {
     uint64_t          conn_yields; /* # of yields for connections (-R option)*/
     uint64_t          auth_cmds;
     uint64_t          auth_errors;
+    HTGRAM_HANDLE     request_htgram;
     struct slab_stats slab_stats[MAX_NUMBER_OF_SLAB_CLASSES];
 };
 
@@ -391,6 +392,8 @@ struct conn {
     ENGINE_ERROR_CODE aiostat;
     bool ewouldblock;
     TAP_ITERATOR tap_iterator;
+
+    uint64_t conn_parse_cmd_start;
 };
 
 /*

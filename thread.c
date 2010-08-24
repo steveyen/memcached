@@ -502,6 +502,10 @@ void threadlocal_stats_clear(struct thread_stats *stats) {
     stats->auth_cmds = 0;
     stats->auth_errors = 0;
 
+    if (stats->request_htgram != NULL) {
+        htgram_reset(stats->request_htgram);
+    }
+
     memset(stats->slab_stats, 0,
            sizeof(struct slab_stats) * MAX_NUMBER_OF_SLAB_CLASSES);
 }
