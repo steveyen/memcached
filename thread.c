@@ -401,6 +401,8 @@ void notify_io_complete(const void *cookie, ENGINE_ERROR_CODE status)
         return;
     }
 
+    assert(thr->type == GENERAL || thr->type == TAP);
+
     conn->aiostat = status;
 
     /* Move the connection to the closing state if the engine

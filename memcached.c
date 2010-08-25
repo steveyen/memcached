@@ -649,6 +649,12 @@ conn *conn_new(const int sfd, STATE_FUNC init_state,
 static void conn_cleanup(conn *c) {
     assert(c != NULL);
 
+    c->engine_storage = NULL;
+    c->tap_iterator = NULL;
+    c->next = NULL;
+    c->ascii_cmd = NULL;
+    c->sfd = -1;
+
     if (c->item) {
         settings.engine.v1->release(settings.engine.v0, c, c->item);
         c->item = 0;
@@ -675,16 +681,11 @@ static void conn_cleanup(conn *c) {
         sasl_dispose(&c->sasl_conn);
         c->sasl_conn = NULL;
     }
-
-    c->engine_storage = NULL;
-    c->tap_iterator = NULL;
-    c->thread = NULL;
-    c->next = NULL;
-    c->ascii_cmd = NULL;
 }
 
 static void conn_close(conn *c) {
     assert(c != NULL);
+    assert(c->thread);
 
     /* delete the event, the socket and the conn */
     event_del(&c->event);
@@ -706,8 +707,10 @@ static void conn_close(conn *c) {
     LOCK_THREAD(c->thread);
     /* remove from pending-io list */
     conn* pending = c->thread->pending_io;
+    assert(c->thread->type == GENERAL || c->thread->type == TAP);
     conn* prev = NULL;
     while (pending) {
+        assert(pending->thread == c->thread);
         if (pending == c) {
             if (settings.verbose > 1) {
                 settings.extensions.logger->log(EXTENSION_LOG_DEBUG, c,
@@ -718,12 +721,11 @@ static void conn_close(conn *c) {
             } else {
                 prev->next = c->next;
             }
+        } else {
+            prev = pending;
         }
-        prev = pending;
         pending = pending->next;
     }
-
-    UNLOCK_THREAD(c->thread);
 
     conn_cleanup(c);
 
@@ -734,6 +736,10 @@ static void conn_close(conn *c) {
      */
     conn_reset_buffersize(c);
     cache_free(conn_cache, c);
+
+    LIBEVENT_THREAD *thr = c->thread;
+    c->thread = NULL;
+    UNLOCK_THREAD(thr);
 
     STATS_LOCK();
     stats.curr_conns--;
